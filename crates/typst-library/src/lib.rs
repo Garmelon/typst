@@ -15,6 +15,7 @@ extern crate self as typst_library;
 pub mod diag;
 pub mod engine;
 pub mod foundations;
+pub mod html;
 pub mod introspection;
 pub mod layout;
 pub mod loading;
@@ -218,6 +219,8 @@ fn global(math: Module, inputs: Dict) -> Module {
     self::introspection::define(&mut global);
     self::loading::define(&mut global);
     self::symbols::define(&mut global);
+    global.reset_category();
+    global.define_module(self::html::module());
     prelude(&mut global);
     Module::new("global", global)
 }

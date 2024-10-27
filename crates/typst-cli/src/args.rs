@@ -154,6 +154,18 @@ pub struct CompileCommand {
     /// conformance with.
     #[arg(long = "pdf-standard", value_delimiter = ',')]
     pub pdf_standard: Vec<PdfStandard>,
+
+    /// Enables in-development features that may change or be removed at any
+    /// time.
+    #[arg(long = "feature", value_delimiter = ',')]
+    pub feature: Vec<Feature>,
+}
+
+/// An in-development features that may change or be removed at any time.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, ValueEnum)]
+pub enum Feature {
+    /// Enables HTML export.
+    Html,
 }
 
 /// A PDF standard that Typst can enforce conformance with.
@@ -501,6 +513,7 @@ pub enum OutputFormat {
     Pdf,
     Png,
     Svg,
+    Html,
 }
 
 impl Display for OutputFormat {

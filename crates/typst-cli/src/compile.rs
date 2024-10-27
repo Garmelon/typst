@@ -12,15 +12,15 @@ use typst::diag::{
     bail, At, Severity, SourceDiagnostic, SourceResult, StrResult, Warned,
 };
 use typst::foundations::{Datetime, Smart};
-use typst::layout::{Frame, Page, PageRanges};
-use typst::model::Document;
+use typst::html::HtmlDocument;
+use typst::layout::{Frame, Page, PageRanges, PagedDocument};
 use typst::syntax::{FileId, Source, Span};
 use typst::WorldExt;
 use typst_pdf::{PdfOptions, PdfStandards};
 
 use crate::args::{
-    CompileCommand, DiagnosticFormat, Input, Output, OutputFormat, PageRangeArgument,
-    PdfStandard,
+    CompileCommand, DiagnosticFormat, Feature, Input, Output, OutputFormat,
+    PageRangeArgument, PdfStandard,
 };
 use crate::timings::Timer;
 use crate::watch::Status;
@@ -42,6 +42,7 @@ impl CompileCommand {
                     OutputFormat::Pdf => "pdf",
                     OutputFormat::Png => "png",
                     OutputFormat::Svg => "svg",
+                    OutputFormat::Html => "html",
                 },
             ))
         })
@@ -51,13 +52,14 @@ impl CompileCommand {
     ///
     /// Will return `Err` if the format was not specified and could not be inferred.
     pub fn output_format(&self) -> StrResult<OutputFormat> {
-        Ok(if let Some(specified) = self.format {
+        let format = if let Some(specified) = self.format {
             specified
         } else if let Some(Output::Path(output)) = &self.output {
             match output.extension() {
                 Some(ext) if ext.eq_ignore_ascii_case("pdf") => OutputFormat::Pdf,
                 Some(ext) if ext.eq_ignore_ascii_case("png") => OutputFormat::Png,
                 Some(ext) if ext.eq_ignore_ascii_case("svg") => OutputFormat::Svg,
+                Some(ext) if ext.eq_ignore_ascii_case("html") => OutputFormat::Html,
                 _ => bail!(
                     "could not infer output format for path {}.\n\
                      consider providing the format manually with `--format/-f`",
@@ -66,7 +68,13 @@ impl CompileCommand {
             }
         } else {
             OutputFormat::Pdf
-        })
+        };
+
+        if format == OutputFormat::Html && !self.feature.contains(&Feature::Html) {
+            bail!("HTML export is only available when `--feature html` is passed");
+        }
+
+        Ok(format)
     }
 
     /// The ranges of the pages to be exported as specified by the user.
@@ -96,9 +104,6 @@ impl CompileCommand {
 
 /// Execute a compilation command.
 pub fn compile(mut timer: Timer, mut command: CompileCommand) -> StrResult<()> {
-    // Only meant for input validation
-    _ = command.output_format()?;
-
     let mut world =
         SystemWorld::new(&command.common).map_err(|err| eco_format!("{err}"))?;
     timer.record(&mut world, |world| compile_once(world, &mut command, false))??;
@@ -114,15 +119,16 @@ pub fn compile_once(
     command: &mut CompileCommand,
     watching: bool,
 ) -> StrResult<()> {
+    _ = command.output_format()?;
+
     let start = std::time::Instant::now();
     if watching {
         Status::Compiling.print(command).unwrap();
     }
 
-    let Warned { output, warnings } = typst::compile(world);
-    let result = output.and_then(|document| export(world, &document, command, watching));
+    let Warned { output, warnings } = compile_and_export(world, command, watching);
 
-    match result {
+    match output {
         // Export the PDF / PNG.
         Ok(()) => {
             let duration = start.elapsed();
@@ -168,14 +174,43 @@ pub fn compile_once(
     Ok(())
 }
 
+fn compile_and_export(
+    world: &mut SystemWorld,
+    command: &mut CompileCommand,
+    watching: bool,
+) -> Warned<SourceResult<()>> {
+    let format = command.output_format().unwrap();
+
+    match format {
+        OutputFormat::Html => {
+            let Warned { output, warnings } = typst::compile::<HtmlDocument>(world);
+            let result = output.and_then(|document| {
+                command
+                    .output()
+                    .write(typst_html::html(&document).as_bytes())
+                    .map_err(|err| eco_format!("failed to write HTML file ({err})"))
+                    .at(Span::detached())
+            });
+            Warned { output: result, warnings }
+        }
+        _ => {
+            let Warned { output, warnings } = typst::compile::<PagedDocument>(world);
+            let result =
+                output.and_then(|document| export(world, &document, command, watching));
+            Warned { output: result, warnings }
+        }
+    }
+}
+
 /// Export into the target format.
 fn export(
     world: &mut SystemWorld,
-    document: &Document,
+    document: &PagedDocument,
     command: &CompileCommand,
     watching: bool,
 ) -> SourceResult<()> {
     match command.output_format().at(Span::detached())? {
+        OutputFormat::Pdf => export_pdf(document, command),
         OutputFormat::Png => {
             export_image(world, document, command, watching, ImageExportFormat::Png)
                 .at(Span::detached())
@@ -184,12 +219,12 @@ fn export(
             export_image(world, document, command, watching, ImageExportFormat::Svg)
                 .at(Span::detached())
         }
-        OutputFormat::Pdf => export_pdf(document, command),
+        OutputFormat::Html => todo!(),
     }
 }
 
 /// Export to a PDF.
-fn export_pdf(document: &Document, command: &CompileCommand) -> SourceResult<()> {
+fn export_pdf(document: &PagedDocument, command: &CompileCommand) -> SourceResult<()> {
     let options = PdfOptions {
         ident: Smart::Auto,
         timestamp: convert_datetime(
@@ -229,7 +264,7 @@ enum ImageExportFormat {
 /// Export to one or multiple images.
 fn export_image(
     world: &mut SystemWorld,
-    document: &Document,
+    document: &PagedDocument,
     command: &CompileCommand,
     watching: bool,
     fmt: ImageExportFormat,
